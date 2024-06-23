@@ -1,0 +1,473 @@
+---
+title: "Healthy Donor Seurat"
+author: "Emma Nguyen"
+date: "2024-06-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, root.dir = normalizePath("C:/Emma /healthy donors"))
+```
+
+# Install necessary packages
+```{r}
+#install.packages("Seurat")
+#packageVersion("Seurat")
+
+library(SingleCellExperiment)
+library(Seurat)
+library(tidyverse)
+library(Matrix)
+library(scales)
+library(cowplot)
+library(RCurl)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(Matrix)
+```
+
+```{r}
+work_dir <- ("~/Emma /healthy donors_GSE224995")
+setwd(work_dir)
+list.files()
+```
+
+# Inspect data
+```{r}
+library(data.table)
+features <- fread("features.tsv.gz")
+head(features, 50)
+
+barcodes <- fread("barcodes.tsv.gz")
+head(barcodes, 50)
+
+con <-gzfile("matrix.mtx.gz", "rt")
+lines <- readLines(con, n=50)
+close(con)
+cat(lines, sep = "\n")
+```
+
+# Load data into a matrix and create Seurat Obj
+Attempt 1
+```{r}
+# set up working path to the files
+
+# if working directory is set up properly, no need for path
+#matrix_path <- "/mnt/workspace/Emma/healthy donors_GSE224995/matrix.mtx.gz"
+#features_path <- "/mnt/workspace/Emma/healthy donors_GSE224995/features.tsv.gz"
+#barcodes_path <- "/mnt/workspace/Emma/healthy donors_GSE224995/barcodes.tsv.gz"
+
+expression_mtx <- ReadMtx(mtx = 'matrix.mtx.gz',features = 'features.tsv.gz', cells = 'barcodes.tsv.gz', feature.column = 1)
+
+
+obj <- CreateSeuratObject(counts = expression_mtx, project = "heart", 
+                          min.cells = 3, min.features = 200)
+```
+
+Attempt 2
+```{r}
+duplicated_rows <- expression_mtx[duplicated(rownames(expression_mtx)),]
+
+expression_mtx <- expression_mtx[!duplicated(rownames(expression_mtx)),]
+
+obj <- CreateSeuratObject(counts = expression_mtx, project = "heart", 
+                          min.cells = 3, min.features = 200)
+
+
+```
+
+Attempt 3
+```{r}
+matx <- readMM('matrix.mtx.gz')
+matx <- Matrix::t(matx)
+matx <- as(matx, 'dgCMatrix')
+
+features <- readLines("features.tsv.gz")
+barcodes <- readLines("barcodes.tsv.gz")
+
+colnames(matx) <- barcodes
+rownames(matx) <- features
+
+assay <-CreateAssayObject(counts= matx, assay = 'RNA', min.features = 200, min.cells =3)
+obj <- CreateSeuratObject(assay)
+```
+
+Attempt 4 # This works #
+```{r}
+data_dir <- "~/Emma /healthy donors_GSE224995"
+data <- Read10X(data.dir= data_dir, gene.column =1)
+
+seurat_obj <- CreateSeuratObject(counts= data)
+
+# Add metadata to Seurat objects
+metadata <- read.table("features.tsv.gz", header = TRUE, sep= "\t")
+head(metadata)
+
+seurat_barcodes <- colnames(seurat_obj)
+head(seurat_barcodes)
+
+rownames(metadata) <- metadata[,1]
+metadata <- metadata[,-1]
+
+# add rownames and colnames to metadata
+metadata <- metadata[match(seurat_barcodes, rownames(metadata)),]
+
+head(seurat_obj@meta.data)
+```
+
+# Quality Control
+# don't need this 
+```{r}
+# https://github.com/hbctraining/In-depth-NGS-Data-Analysis-Course/blob/master/sessionIV/lessons/SC_quality_control_analysis.md
+
+# Load the dataset
+counts <- readMM("matrix.mtx.gz")
+genes <- read_tsv("features.tsv.gz", col_names = FALSE)
+gene_ids <- genes$X1 
+cell_ids <- read_tsv("barcodes.tsv.gz", col_names = FALSE)$X1
+
+# Make column names as the cell IDs and row names as gene IDs
+rownames(counts) <- gene_ids
+colnames(counts) <- cell_ids
+
+# Create metadata table
+metadata <- data.frame(row.names = cell_ids, cells = cell_ids, stringsAsFactors= F)
+
+# Add number of UMIs to meta
+metadata$nUMI <- Matrix::colSums(counts)
+
+# Add number of genes detected
+metadata$nGene <-  Matrix::colSums(counts >0)
+
+# Add number of UMIs/ gene
+metadata$log10GenesPerUMI <-  log10(metadata$nGene)/ log10(metadata$nUMI)
+```
+
+
+# Dowloaded AnnotationHub and Ensembl if needed 
+```{r}
+#install.packages("BioManager")
+#BiocManager::install("AnnotationHub")
+#library(AnnotationHub)
+
+#ah <- AnnotationHub()
+
+# Access Ensembl database
+#ahDb <- query(ah, pattern = c("Homo sapiens", "EnsDb"), ignore.case = TRUE)
+
+# Extract gene-level information
+annotaions <- AnnotationDbi::select(
+  org.Hs.eg.db, keys= gene_results$gene_id,
+  columns = c('SYMBOL', 'GENENAME'), keytype = 'ENTREZID'
+)
+
+
+# Extract annotations of interest
+library(ensembldb)
+library(EnsDb.Hsapiens.v86)
+edb <- EnsDb.Hsapiens.v86
+annotations <- genes(edb, return.type= 'data.frame')
+View(annotaions)
+  
+annotations <- annotations %>%
+  dplyr::select(gene_id, gene_name, gene_biotype, seq_name, description, entrezid)
+
+# See biotypes
+annotations$gene_biotype %>%
+  factor() %>%
+  levels()
+```
+
+
+# Visualize QC metrics
+```{r}
+# do not concern Mitochondrial DNA
+VlnPlot(seurat_obj, features = c("nFeature_RNA", "nCount_RNA"), ncol = 2)
+```
+
+```{r}
+# Relationships between count and feature 
+plot1 <- FeatureScatter(seurat_obj, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 
+```
+
+# Normalizing the data
+```{r}
+seurat_obj <- NormalizeData(seurat_obj, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+# Subset for high cell-cell variation
+```{r}
+seurat_obj <- FindVariableFeatures(seurat_obj, selection.method = "vst", nfeatures = 2000)
+
+# Identify 10 most highly variable genes
+top10 <- head(VariableFeatures(seurat_obj), 10)
+print(top10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(seurat_obj)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+
+plot2
+```
+
+# Scaling the data
+```{r}
+all.genes <- rownames(seurat_obj)
+seurat_obj <- ScaleData(seurat_obj, features = all.genes)
+```
+
+# PCA
+```{r}
+seurat_obj <- RunPCA(seurat_obj, features = VariableFeatures(object = seurat_obj))
+
+print(seurat_obj[["pca"]], dims = 1:5, nfeatures = 5)
+```
+
+```{r}
+VizDimLoadings(seurat_obj, dims = 1:2, reduction = "pca")
+```
+
+```{r}
+DimPlot(seurat_obj, reduction = "pca") 
+```
+
+```{r}
+DimHeatmap(seurat_obj, dims = 1, cells = 500, balanced = TRUE)
+```
+
+# Determine dimension
+```{r}
+ElbowPlot(seurat_obj)
+```
+```{r}
+# another way of checking dimension of dataset
+dims_av <- length(seurat_obj[["pca"]][[1]])
+seurat_ob <- JackStraw(seurat_obj, num.replicate =100)
+seurat_ob <- ScoreJackStraw(seurat_ob, dims = 1:20)
+JackStrawPlot(seurat_ob, dims = 1:20)
+```
+
+# Cluster the cells 
+```{r}
+seurat_obj <- FindNeighbors(seurat_obj, dims= 1:15) # less variation after 15 as above
+seurat_obj <- FindClusters(seurat_obj, resolution =0.5) # 0.4-1.2, increase = more cluster
+
+# Look at cluster IDs of the first 5 cells
+head(Idents(seurat_obj), 5)
+```
+
+
+# UMAP/tSNE
+```{r}
+seurat_obj <- RunUMAP(seurat_obj, dims = 1:15) # 15 as determine above
+
+DimPlot(seurat_obj, reduction = "umap")
+
+
+
+saveRDS(seurat_obj, file = "../umap.rds")
+```
+
+# Finding cluster biomarkers
+```{r}
+# find top 5 markers of cluster 2
+cluster2.markers <- FindMarkers(seurat_obj, ident.1 = 2)
+head(cluster2.markers, n = 5)
+```
+
+
+```{r}
+# find markers for only positive cluster, only positive
+
+seurat.markers <- FindAllMarkers(seurat_obj, only.pos = TRUE)
+seurat.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+print(seurat.markers)
+
+# this will list all marker in each cluster, might be a bit hard to see 
+markers_table <- seurat.markers %>%
+  group_by(cluster) %>%
+  summarise(markers = paste(gene, collapse = ",")) %>%
+  as.data.frame()
+print(markers_table)
+
+# this save all marker into a table, might need to reopen in Excel to get the format right 
+write.table(seurat.markers, file= "markers_table.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+
+```
+
+# Some plot
+```{r}
+# plot features
+VlnPlot(seurat_obj, features = c("RBM47", "CD163"))
+
+
+# plot raw counts 
+VlnPlot(seurat_obj, features = c("RBM47", "CD163"), slot = "counts", log = TRUE)
+```
+
+```{r}
+# Pick gene names as preferred
+# Split into smaller chunks for easier to read graph
+FeaturePlot(seurat_obj, features = c("F13A1", "MRC1", "CD163", "SLCO2B1","RBM47"))
+                                    
+                                    #  "EGFLAM", "GUCY1A2", "NR2F2-AS1", "ENPEP", "ABCC9",
+                                    #  "SLC9A9", "GAS7", "EPB41L3", "COLEC12",
+                                    # "DOCK2", "BICC1", "FBN1", "DCN", "GLIS3", "NEGR1" ))
+```
+```{r}
+FeaturePlot(seurat_obj, features = c("EGFLAM", "GUCY1A2", "NR2F2-AS1", "ENPEP", "ABCC9"))
+```
+
+```{r}
+FeaturePlot(seurat_obj, features = c("SLC9A9", "GAS7", "EPB41L3", "COLEC12"))
+```
+
+```{r}
+FeaturePlot(seurat_obj, features = c("DOCK2", "BICC1", "FBN1", "DCN", "GLIS3", "NEGR1" ))
+```
+
+```{r}
+# top 2 marker genes for each cluster 
+features <- seurat.markers %>%
+    group_by(cluster) %>%
+  top_n(n=2, wt= avg_log2FC)
+print(features)  
+
+write.table(features, file= "top_features.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+---------
+# Assigning cell type identity to clusters
+# Need cell types reference for each cluster
+```{r}
+new.cluster.ids <- c("# go to Ethan to find reference")
+names(new.cluster.ids) <- levels(seurat_obj)
+pbmc <- RenameIdents(seurat_obj, new.cluster.ids)
+
+DimPlot(seurat_obj, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+
+```{r}
+plot <- DimPlot(seurat_obj, reduction = "umap", label = TRUE, label.size = 4.5) + xlab("UMAP 1") + ylab("UMAP 2") +
+    theme(axis.title = element_text(size = 18), legend.text = element_text(size = 18)) + guides(colour = guide_legend(override.aes = list(size = 10)))
+
+ggsave(filename = "../output/images/pbmc3k_umap.jpg", height = 7, width = 12, plot = plot, quality = 50)
+```
+
+------
+# scCATCH
+```{r}
+install.packages("scCATCH")
+library(scCATCH)
+
+counts <- GetAssayData(seurat_obj, slot = "counts")
+seurat_clusters <- seurat_obj$seurat_clusters
+head(seurat_clusters)
+table(seurat_clusters)
+
+dim(counts)
+dim(seurat_clusters)
+
+?createscCATCH
+seurat_clusters <- as.character(seurat_clusters)
+```
+
+
+```{r}
+# create a scCATCH object
+sc_obj <- createscCATCH(data= counts, cluster = seurat_clusters)
+str(sc_obj)
+
+# need to check "cellmatch" database
+data(cellmatch)
+str(cellmatch)
+unique(cellmatch$species)
+unique(cellmatch$tissue)
+
+human_heart_marker <- cellmatch[cellmatch$species== "Human" & cellmatch$tissue== "Heart",]
+view(human_heart_marker)
+
+# find marker gene for each cluster
+sc_obj <- findmarkergene(object= sc_obj, species = "Human", marker= cellmatch, tissue= "Heart")
+head(sc_obj@marker)
+
+sc_obj <- findcelltype(sc_obj)
+sc_obj@celltype
+
+write.table(sc_obj@celltype, file= "cell_type.tsv", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+
+------
+# Volcano Plot 
+```{r}
+install.packages("harmony")
+library(harmony)
+library(RColorBrewer)
+library(ggrepel)
+library(gridExtra)
+
+BiocManager::install('EnhancedVolcano')
+BiocManager::install('DESeq2')
+library(EnhancedVolcano)
+library(readr)
+library(DESeq2)
+library(AnnotationDbi)
+library("org.Hs.eg.db")
+library(ComplexHeatmap)
+library(circlize)
+
+BiocManager::install('clusterProfiler')
+library(gprofiler2)
+library(clusterProfiler)
+```
+
+```{r}
+min(seurat.markers$avg_log2FC)
+max(seurat.markers$avg_log2FC)
+min(seurat.markers$p_val_adj)
+max(seurat.markers$p_val_adj)
+
+#  adjusted p = 0.05, FC= 2.5,
+EnhancedVolcano(
+  seurat.markers,
+  lab= rownames(seurat.markers),
+  x= "avg_log2FC",
+  y= "p_val_adj",
+  title = "Enhanced Volcano Plot",
+  xlab= "Log2 Fold Change",
+  ylab= "Adjusted P-value",
+  pCutoff = 0.05,
+  FCcutoff= 2.5,
+  pointSize= 2.0,
+  labSize= 3.0
+)
+
+#
+EnhancedVolcano(
+  seurat.markers,
+  lab= rownames(seurat.markers),
+  x= "avg_log2FC",
+  y= "p_val_adj",
+  title = "Enhanced Volcano Plot",
+  xlab= "Log2 Fold Change",
+  ylab= "Adjusted P-value",
+  pCutoff = 10e-16,
+  FCcutoff= 0.5,
+  pointSize= 3.0,
+  labSize= 6.0
+)
+```
+
+
+```{r}
+saveRDS(seurat_obj, file ="../healthy donors_GSE224995/final_seurat.rds")
+```
+
+

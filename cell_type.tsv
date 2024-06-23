@@ -1,0 +1,4 @@
+cluster	cluster_marker	cell_type	celltype_score	celltype_related_marker	PMID
+15	TNNT2, TNNI3	Cardiomyocyte	0.67	TNNI3, TNNT2	29574510, 27123009
+0	VWF, FLT1	Endothelial Cell, Progenitor Cell	0.5, 0.5	VWF, FLT1	10749731, 23056209
+4	ACTN1	Cardiomyocyte	0.75	ACTN1	29574510, 26708230, 25657056
